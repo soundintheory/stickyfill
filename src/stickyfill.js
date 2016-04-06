@@ -4,7 +4,11 @@
         initialized = false,
         html = doc.documentElement,
         noop = function() {},
+        hasNativeSupport = false,
         checkTimer,
+        scrollbarWidth,
+        windowWidth,
+        $window = $(window),
 
         //visibility API strings
         hiddenPropertyName = 'hidden',
@@ -31,10 +35,11 @@
         }
         catch(e) {}
         if (block.style.position != '') {
-            seppuku();
+            hasNativeSupport = true;
         }
     }
 
+    updateWindowWidth();
     updateScrollPos();
 
     //commit seppuku!
@@ -85,6 +90,7 @@
     }
 
     function recalcAllPos() {
+        
         for (var i = watchArray.length - 1; i >= 0; i--) {
             recalcElementPos(watchArray[i]);
         }
@@ -93,7 +99,52 @@
     function recalcElementPos(el) {
         if (!el.inited) return;
 
+        var topWithOffset = el.limit.start + el.stickyOffset;
         var currentMode = (scroll.top <= el.limit.start? 0: scroll.top >= el.limit.end? 2: 1);
+        var modeWithOffset = (scroll.top <= topWithOffset? 0: scroll.top >= el.limit.end? 2: 1);
+        if (el.minWidth !== undefined && windowWidth < el.minWidth) currentMode = modeWithOffset = 0;
+        if (el.maxWidth !== undefined && windowWidth > el.maxWidth) currentMode = modeWithOffset = 0;
+        
+        if (el.modeWithOffset != modeWithOffset)
+        {
+            var changed = false;
+            el.modeWithOffset = modeWithOffset;
+
+            if (el.modeWithOffset > 0) {
+                if (!$(el.node).hasClass('stuck')) {
+                    $(el.node).addClass('stuck');
+                    if (el.$before) el.$before.addClass('stuck');
+                    if (el.$after) el.$after.addClass('stuck');
+                    changed = true;
+                }
+
+                if (el.modeWithOffset > 1) {
+                    if (!$(el.node).hasClass('stuck-bottom')) {
+                        $(el.node).addClass('stuck-bottom');
+                        if (el.$before) el.$before.addClass('stuck-bottom');
+                        if (el.$after) el.$after.addClass('stuck-bottom');
+                        changed = true;
+                    }
+                } else {
+                    if ($(el.node).hasClass('stuck-bottom')) {
+                        $(el.node).removeClass('stuck-bottom');
+                        if (el.$before) el.$before.removeClass('stuck-bottom');
+                        if (el.$after) el.$after.removeClass('stuck-bottom');
+                        changed = true;
+                    }
+                }
+
+            } else {
+                if ($(el.node).hasClass('stuck')) {
+                    $(el.node).removeClass('stuck stuck-bottom');
+                    if (el.$before) el.$before.removeClass('stuck stuck-bottom');
+                    if (el.$after) el.$after.removeClass('stuck stuck-bottom');
+                    changed = true;
+                }
+            }
+
+            changed && rebuild();
+        }
 
         if (el.mode != currentMode) {
             switchElementMode(el, currentMode);
@@ -118,9 +169,12 @@
 
         el.inited = true;
 
-        if (!el.clone) clone(el);
-        if (el.parent.computed.position != 'absolute' &&
-            el.parent.computed.position != 'relative') el.parent.node.style.position = 'relative';
+        if (!hasNativeSupport)
+        {
+            if (!el.clone) clone(el);
+            if (el.parent.computed.position != 'absolute' &&
+                el.parent.computed.position != 'relative') el.parent.node.style.position = 'relative';
+        }
 
         recalcElementPos(el);
 
@@ -132,18 +186,21 @@
         var deinitParent = true;
 
         el.clone && killClone(el);
-        mergeObjects(el.node.style, el.css);
+        if (!hasNativeSupport)
+        {
+            mergeObjects(el.node.style, el.css);
 
-        //check whether element's parent is used by other stickies
-        for (var i = watchArray.length - 1; i >= 0; i--) {
-            if (watchArray[i].node !== el.node && watchArray[i].parent.node === el.parent.node) {
-                deinitParent = false;
-                break;
-            }
-        };
+            //check whether element's parent is used by other stickies
+            for (var i = watchArray.length - 1; i >= 0; i--) {
+                if (watchArray[i].node !== el.node && watchArray[i].parent.node === el.parent.node) {
+                    deinitParent = false;
+                    break;
+                }
+            };
 
-        if (deinitParent) el.parent.node.style.position = el.parent.css.position;
-        el.mode = -1;
+            if (deinitParent) el.parent.node.style.position = el.parent.css.position;
+        }
+        el.mode = el.modeWithOffset = -1;
     }
 
     function initAll() {
@@ -159,6 +216,11 @@
     }
 
     function switchElementMode(el, mode) {
+
+        el.mode = mode;
+
+        if (hasNativeSupport) return;
+
         var nodeStyle = el.node.style;
 
         switch (mode) {
@@ -197,8 +259,6 @@
                 nodeStyle.marginRight = 0;
                 break;
         }
-
-        el.mode = mode;
     }
 
     function clone(el) {
@@ -226,7 +286,14 @@
         el.clone = undefined;
     }
 
-    function getElementParams(node) {
+    function getElementParams(node, $before, $after) {
+
+        if (!$before)
+            $before = $('<div class="sticky-waypoint-before'+(!!$(node).attr('id') ? ' sticky-waypoint-'+$(node).attr('id') : '')+'"></div>').insertBefore(node)
+
+        if (!$after)
+            $after = $('<div class="sticky-waypoint-after'+(!!$(node).attr('id') ? ' sticky-waypoint-'+$(node).attr('id') : '')+'"></div>').insertAfter(node);
+
         var computedStyle = getComputedStyle(node),
             parentNode = node.parentNode,
             parentComputedStyle = getComputedStyle(parentNode),
@@ -266,6 +333,7 @@
                 marginRight: node.style.marginRight
             },
             nodeOffset = getElementOffset(node),
+            beforeOffset = getElementOffset($before[0]),
             parentOffset = getElementOffset(parentNode),
             
             parent = {
@@ -286,6 +354,8 @@
 
             el = {
                 node: node,
+                $before: $before,
+                $after: $after,
                 box: {
                     left: nodeOffset.win.left,
                     right: html.clientWidth - nodeOffset.win.right
@@ -304,8 +374,11 @@
                 mode: -1,
                 inited: false,
                 parent: parent,
+                maxWidth: $(node).data('stickyMax'),
+                minWidth: $(node).data('stickyMin'),
+                stickyOffset: ($(node).data('stickyOffset') != null ? $(node).data('stickyOffset') : 0),
                 limit: {
-                    start: nodeOffset.doc.top - numeric.top,
+                    start: beforeOffset.doc.top - numeric.top,
                     end: parentOffset.doc.top + parentNode.offsetHeight - parent.numeric.borderBottomWidth -
                         node.offsetHeight - numeric.top - numeric.marginBottom
                 }
@@ -368,6 +441,7 @@
         win.addEventListener('wheel', onWheel);
 
         //watch for width changes
+        win.addEventListener('load', rebuild);
         win.addEventListener('resize', rebuild);
         win.addEventListener('orientationchange', rebuild);
 
@@ -382,10 +456,12 @@
     function rebuild() {
         if (!initialized) return;
 
+        updateWindowWidth();
         deinitAll();
         
         for (var i = watchArray.length - 1; i >= 0; i--) {
-            watchArray[i] = getElementParams(watchArray[i].node);
+            var newParams = getElementParams(watchArray[i].node, watchArray[i].$before, watchArray[i].$after);
+            watchArray[i] = newParams;
         }
         
         initAll();
@@ -445,6 +521,20 @@
         };
     }
 
+    function getScrollbarWidth() {
+        if (scrollbarWidth===undefined) {
+            var div = $('<div style="width:50px;height:50px;overflow:auto"><div/></div>').appendTo('body');
+            var inner = div.children();
+            scrollbarWidth = inner.innerWidth() - inner.height(99).innerWidth();
+            div.remove();
+        }
+        return scrollbarWidth;
+    }
+
+    function updateWindowWidth() {
+        windowWidth = $window.width();
+    }
+
     //expose Stickyfill
     win.Stickyfill = {
         stickies: watchArray,
@@ -457,6 +547,87 @@
         kill: kill
     };
 })(document, window);
+
+// ------------------------------------------------------------------------------------------------------
+// STICKY POLYFILL
+
+/*
+StickyPolyfill = {};
+
+StickyPolyfill.init = function()
+{
+    this.$window = $(window);
+    this.$stickies = $([]);
+    this.waypoints = [];
+    this.throttleTimeout = null;
+
+    // For better sticky js recalculation
+    this.$window.on('resize load', $.proxy(function(e) {
+        this.$window.scroll();
+    }, this));
+
+    // Active classes for sticky elements
+    this.$window.on('scroll wheel', $.proxy(this.onScroll, this));
+
+    // Add items already on the page
+    this.addItems($('.sticky'));
+}
+
+StickyPolyfill.addItems = function($items)
+{
+    if (!$items.length) return;
+
+    $items.Stickyfill().each($.proxy(function(i, el) {
+        var $waypointBefore = $('<div class="sticky-waypoint-before'+(!!$(el).attr('id') ? ' sticky-waypoint-'+$(el).attr('id') : '')+'"></div>').insertBefore($(el));
+        var $waypointAfter = $('<div class="sticky-waypoint-after'+(!!$(el).attr('id') ? ' sticky-waypoint-'+$(el).attr('id') : '')+'"></div>').insertAfter($(el));
+        this.waypoints.push({
+            waypointBefore: $waypointBefore[0],
+            waypointAfter: $waypointAfter[0],
+            sticky: el
+        });
+    }, this));
+
+    this.$window.scroll();
+}
+
+StickyPolyfill.onScroll = function()
+{
+    clearTimeout(this.throttleTimeout);
+    this.throttleTimeout = setTimeout($.proxy(function() {
+
+        for (var i = 0; i < this.waypoints.length; i++) {
+
+            var item = this.waypoints[i];
+            var offset = $(item.sticky).data('stuck-offset') != null ? $(item.sticky).data('stuck-offset') : 0;
+            var top = item.sticky.style.position != 'absolute' ? parseInt($(item.sticky).css('top') || 0) : 0;
+            var stuck = (item.waypointBefore.getBoundingClientRect().top + offset) - top <= 1 && window.pageYOffset > 0;
+            var changed = false;
+
+            if (stuck) {
+                if (!$(item.sticky).hasClass('stuck')) {
+                    $(item.sticky).addClass('stuck').trigger('stick');
+                    $(item.waypointBefore).addClass('stuck');
+                    $(item.waypointAfter).addClass('stuck');
+                    changed = true;
+                }
+            } else {
+                if ($(item.sticky).hasClass('stuck')) {
+                    $(item.sticky).removeClass('stuck').trigger('unstick');
+                    $(item.waypointBefore).removeClass('stuck');
+                    $(item.waypointAfter).removeClass('stuck');
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                window.Stickyfill.rebuild();
+            }
+
+        }
+
+    }, this), 5);
+}
+*/
 
 
 //if jQuery is available -- create a plugin
